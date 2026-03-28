@@ -1,0 +1,10 @@
+# Build output
+radiosity
+src/*.o
+
+# Rendered output
+output.ppm
+output.png
+
+# Python virtual environment
+.venv/
