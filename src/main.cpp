@@ -7,6 +7,7 @@
 #include "radiosity.h"
 #include "render.h"
 #include "discmesh.h"
+#include "teapot.h"
 
 static Scene g_scene;
 static bool  g_save_next_frame = true;   // auto-save on the first rendered frame
@@ -49,6 +50,7 @@ int main(int argc, char** argv)
     // Parse flags before passing argc/argv to GLUT
     bool use_disc_mesh  = false;
     bool skip_radiosity = false;
+    bool add_teapot     = false;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--disc-mesh") == 0 ||
             std::strcmp(argv[i], "-d") == 0)
@@ -56,11 +58,15 @@ int main(int argc, char** argv)
         if (std::strcmp(argv[i], "--no-radiosity") == 0 ||
             std::strcmp(argv[i], "-n") == 0)
             skip_radiosity = true;
+        if (std::strcmp(argv[i], "--teapot") == 0 ||
+            std::strcmp(argv[i], "-t") == 0)
+            add_teapot = true;
     }
 
     // Build scene
     std::printf("Building Cornell Box scene...\n");
     g_scene.buildCornellBox();
+
     std::printf("  %zu logical faces\n", g_scene.faces.size());
 
     if (use_disc_mesh) {
@@ -70,15 +76,35 @@ int main(int argc, char** argv)
         std::printf("Meshing: uniform grid (W=10, B=4)\n");
         g_scene.meshUniform(10, 4);
     }
-    std::printf("  %zu patches\n", g_scene.patches.size());
+    std::printf("  %zu room patches\n", g_scene.patches.size());
+
+    // Teapot patches are added AFTER meshing: both meshUniform and DiscMesh call
+    // patches.clear() internally, which would delete any pre-added teapot patches.
+    if (add_teapot) {
+        // Short block top-face centroid (Cornell coords, S = 1/555)
+        constexpr float S  = 1.f / 555.f;
+        constexpr float tx = (130.f + 82.f + 240.f + 290.f) * 0.25f * S;
+        constexpr float ty =  165.f * S;
+        constexpr float tz = ( 65.f + 225.f + 272.f + 114.f) * 0.25f * S;
+        // Scale: GLUT height 1.575 × NORM(2) × scale ≈ 0.17 scene units (~94 mm).
+        constexpr float TS = 0.054f;
+        Vec3 white{0.78f, 0.78f, 0.78f};
+        std::printf("Adding Utah Teapot (scale=%.3f)...\n", TS);
+        Teapot::addToScene(g_scene, {tx, ty, tz}, TS, white, 6);
+        std::printf("  %zu total patches (room + teapot)\n", g_scene.patches.size());
+    } else {
+        std::printf("  %zu patches\n", g_scene.patches.size());
+    }
 
     // Initialise OpenGL now — computeFormFactors uses FBO and needs a GL context.
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(640, 480);
     glutCreateWindow(use_disc_mesh
-        ? "Radiosity — disc-mesh (Lischinski 1992)"
-        : "Radiosity — uniform mesh (Cohen 1988)");
+        ? (add_teapot ? "Radiosity — disc-mesh + teapot"
+                      : "Radiosity — disc-mesh (Lischinski 1992)")
+        : (add_teapot ? "Radiosity — uniform mesh + teapot"
+                      : "Radiosity — uniform mesh (Cohen 1988)"));
     Render::init();
 
     if (skip_radiosity) {

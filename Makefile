@@ -7,7 +7,8 @@ SRC = src/main.cpp \
       src/hemicube.cpp \
       src/radiosity.cpp \
       src/render.cpp \
-      src/discmesh.cpp
+      src/discmesh.cpp \
+      src/teapot.cpp
 
 OBJDIR = obj
 OBJ    = $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(SRC))
