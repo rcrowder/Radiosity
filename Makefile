@@ -13,9 +13,18 @@ OBJDIR = obj
 OBJ    = $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(SRC))
 TARGET = radiosity
 
-.PHONY: all clean
+TEST_TARGET = tests/test_discmesh
+TEST_SRC    = tests/test_discmesh.cpp src/scene.cpp src/discmesh.cpp
+
+.PHONY: all clean test
 
 all: $(TARGET)
+
+test: $(TEST_TARGET)
+	./$(TEST_TARGET)
+
+$(TEST_TARGET): $(TEST_SRC)
+	$(CXX) $(CXXFLAGS) -o $@ $^
 
 $(TARGET): $(OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)

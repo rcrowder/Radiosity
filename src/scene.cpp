@@ -90,10 +90,27 @@ void Scene::buildCornellBox()
             {  0,            0,  559.2f*S},
             {549.6f*S,       0,  559.2f*S}, black, white, "Floor");
 
-    addFace({556.0f*S, 548.8f*S,          0},
+    // Ceiling split into 4 strips framing the light opening (light is coplanar at y=548.8*S)
+    // Front strip: full width, z=0..227S
+    addFace({  0,      548.8f*S,          0},
+            {556.0f*S, 548.8f*S,          0},
+            {556.0f*S, 548.8f*S,  227.0f*S},
+            {  0,      548.8f*S,  227.0f*S}, black, white, "Ceiling");
+    // Back strip: full width, z=332S..559.2S
+    addFace({  0,      548.8f*S,  332.0f*S},
+            {556.0f*S, 548.8f*S,  332.0f*S},
             {556.0f*S, 548.8f*S,  559.2f*S},
-            {  0,      548.8f*S,  559.2f*S},
-            {  0,      548.8f*S,          0}, black, white, "Ceiling");
+            {  0,      548.8f*S,  559.2f*S}, black, white, "Ceiling");
+    // Left strip: x=0..213S, z=227S..332S
+    addFace({  0,      548.8f*S,  227.0f*S},
+            {213.0f*S, 548.8f*S,  227.0f*S},
+            {213.0f*S, 548.8f*S,  332.0f*S},
+            {  0,      548.8f*S,  332.0f*S}, black, white, "Ceiling");
+    // Right strip: x=343S..556S, z=227S..332S
+    addFace({343.0f*S, 548.8f*S,  227.0f*S},
+            {556.0f*S, 548.8f*S,  227.0f*S},
+            {556.0f*S, 548.8f*S,  332.0f*S},
+            {343.0f*S, 548.8f*S,  332.0f*S}, black, white, "Ceiling");
 
     addFace({549.6f*S,         0, 559.2f*S},
             {  0,              0, 559.2f*S},
@@ -110,11 +127,11 @@ void Scene::buildCornellBox()
             {556.0f*S, 548.8f*S,   559.2f*S},
             {556.0f*S, 548.8f*S,          0}, black, red, "Left(red)");
 
-    // Light — single face, treated as 1 patch regardless of meshing mode
-    addFace({343.0f*S, 548.8f*S - 0.001f, 227.0f*S},
-            {343.0f*S, 548.8f*S - 0.001f, 332.0f*S},
-            {213.0f*S, 548.8f*S - 0.001f, 332.0f*S},
-            {213.0f*S, 548.8f*S - 0.001f, 227.0f*S}, light_e, black, "Light");
+    // Light — flush with ceiling (coplanar), no offset
+    addFace({343.0f*S, 548.8f*S, 227.0f*S},
+            {343.0f*S, 548.8f*S, 332.0f*S},
+            {213.0f*S, 548.8f*S, 332.0f*S},
+            {213.0f*S, 548.8f*S, 227.0f*S}, light_e, black, "Light");
 
     // ---- Short block ----
     addFace({130.0f*S, 165.0f*S,  65.0f*S},

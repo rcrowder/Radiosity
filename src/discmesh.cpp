@@ -43,11 +43,33 @@
 // follows the 2-D cross product: (b-a) × (p-a) > 0 ⟺ p is left of a→b.
 // ============================================================
 
+// Minimum 2D polygon area (shoelace) below which the polygon is considered
+// degenerate.  Faces are ~1 UV unit wide; this discards polygons covering
+// less than 1/(128²) of the face, which would be sub-pixel at any practical
+// hemicube resolution.
+static constexpr float POLY_AREA_EPS = 6.1e-5f; // 1/(128²) ≈ 6.1e-5
+
 struct Poly2D {
     std::vector<Vec2> verts;
     explicit Poly2D(std::initializer_list<Vec2> il) : verts(il) {}
     explicit Poly2D(std::vector<Vec2> v) : verts(std::move(v)) {}
-    bool empty() const { return verts.size() < 3; }
+
+    // Shoelace (signed) area — positive for CCW, negative for CW.
+    float signedArea() const {
+        const int n = static_cast<int>(verts.size());
+        float a = 0.f;
+        for (int i = 0; i < n; ++i) {
+            const Vec2& p = verts[i];
+            const Vec2& q = verts[(i + 1) % n];
+            a += p.u * q.v - q.u * p.v;
+        }
+        return 0.5f * a;
+    }
+    // A polygon is empty if it has fewer than 3 vertices or its area is
+    // negligible (degenerate sliver from nearly-coincident split lines).
+    bool empty() const {
+        return verts.size() < 3 || std::abs(signedArea()) < POLY_AREA_EPS;
+    }
 };
 
 // Signed distance of p from the line a→b (positive = left side)
@@ -72,9 +94,17 @@ static float intersectT(Vec2 p, Vec2 q, Vec2 a, Vec2 b)
 // Bidirectional Sutherland-Hodgman split: infinite line a→b divides poly into
 // 'left' (sideDist ≥ 0) and 'right' (sideDist < 0) halves.
 // Returns false if the line does not actually cross the polygon interior
-// (one half would have fewer than 3 vertices).
+// (one half would have fewer than 3 vertices or negligible area).
 // Note: vertices exactly on the split line (sideDist == 0) are assigned to
 // the left polygon; both output polygons share those boundary vertices.
+//
+// Post-pass vertex deduplication: after collecting each half, consecutive
+// vertices within VERT_EPS are merged.  This prevents accumulated near-
+// coincident vertices from many nearly-parallel critical lines from producing
+// zero-area sliver polygons, which would later generate patches with garbage
+// normals and permanently-zero radiosity.
+static constexpr float VERT_EPS = 1e-5f; // merge vertices closer than this in UV
+
 static bool splitPoly(const Poly2D& poly, Vec2 a, Vec2 b,
                        Poly2D& left, Poly2D& right)
 {
@@ -87,7 +117,8 @@ static bool splitPoly(const Poly2D& poly, Vec2 a, Vec2 b,
         float dp = sideDist(a, b, p);
         float dq = sideDist(a, b, q);
 
-        if (dp >= 0.f) lv.push_back(p); else rv.push_back(p);
+        if (dp >= 0.f) lv.push_back(p);
+        if (dp <= 0.f) rv.push_back(p);
 
         // If the edge crosses the line, emit the intersection on both sides
         if ((dp > 0.f && dq < 0.f) || (dp < 0.f && dq > 0.f)) {
@@ -98,10 +129,30 @@ static bool splitPoly(const Poly2D& poly, Vec2 a, Vec2 b,
         }
     }
 
-    if (lv.size() < 3 || rv.size() < 3) return false; // line didn't split
+    // Deduplicate consecutive vertices closer than VERT_EPS (wrap-around
+    // handled by checking after each push and at the seam v[last] vs v[0]).
+    auto dedup = [](std::vector<Vec2>& verts) {
+        std::vector<Vec2> out;
+        out.reserve(verts.size());
+        for (const auto& v : verts) {
+            if (!out.empty() && (v - out.back()).length() < VERT_EPS)
+                continue;
+            out.push_back(v);
+        }
+        // Seam: last vs first
+        while (out.size() >= 2 &&
+               (out.back() - out.front()).length() < VERT_EPS)
+            out.pop_back();
+        verts = std::move(out);
+    };
+    dedup(lv);
+    dedup(rv);
 
-    left  = Poly2D(std::move(lv));
-    right = Poly2D(std::move(rv));
+    Poly2D l(std::move(lv)), r(std::move(rv));
+    if (l.empty() || r.empty()) return false;
+
+    left  = std::move(l);
+    right = std::move(r);
     return true;
 }
 
@@ -234,24 +285,58 @@ static Poly2D receiverBoundary(const Face& f)
 //   quad      n==4: one regular quad
 //   n-gon     n>4:  (n-2) triangles, each a fan spoke from verts[0]
 // All resulting patches share the face's emission/reflectance and face_id.
+// Helper: fix a just-emitted triangle patch's normal and center.
+// addPatch computes normal = (v1-v0)×(v3-v0) and center = (v0+v1+v2+v3)/4.
+// For disc-mesh patches, both must come from the parent face:
+//   • Normal must be the face's outward normal (vertex cross-product winding
+//     may produce the opposite sign for non-convex or CW-residual polygons).
+//   • Triangles store v3=v2, so center = (v0+v1+2·v2)/4 — biased toward v2
+//     and potentially outside the triangle; the true centroid is (v0+v1+v2)/3.
+static void fixTriPatch(Scene& scene, const Vec3& f_normal,
+                        const Vec3& p0, const Vec3& p1, const Vec3& p2)
+{
+    Patch& p = scene.patches.back();
+    p.normal = f_normal;
+    p.center = (p0 + p1 + p2) * (1.f / 3.f);
+    (void)p;
+}
+
 static void emitPolygon(Scene& scene, const Poly2D& poly, const Face& f, int face_id)
 {
-    const auto& verts = poly.verts;
-    const int n = static_cast<int>(verts.size());
+    const auto& verts_ref = poly.verts;
+    const int n = static_cast<int>(verts_ref.size());
     if (n < 3) return;
 
+    // Guard: skip sub-pixel slivers (should already be filtered by splitPoly,
+    // but a second check here ensures nothing slips through).
+    float sa = poly.signedArea();
+    if (std::abs(sa) < POLY_AREA_EPS) return;
+
+    // Ensure CCW winding (positive signed area) so the 3D patch normal computed
+    // by addPatch matches the face's outward normal.  splitPoly preserves winding
+    // in the left half but flips it in the right half after deduplication.
+    const std::vector<Vec2>* vp = &verts_ref;
+    std::vector<Vec2> flipped;
+    if (sa < 0.f) {
+        flipped.assign(verts_ref.rbegin(), verts_ref.rend());
+        vp = &flipped;
+    }
+    const std::vector<Vec2>& verts = *vp;
+
     if (n == 3) {
-        // Triangle stored as degenerate quad
         Vec3 p0 = f.unproject(verts[0]);
         Vec3 p1 = f.unproject(verts[1]);
         Vec3 p2 = f.unproject(verts[2]);
         scene.addPatch(p0, p1, p2, p2, f.emission, f.reflectance, face_id);
+        fixTriPatch(scene, f.normal, p0, p1, p2);
     } else if (n == 4) {
         Vec3 p0 = f.unproject(verts[0]);
         Vec3 p1 = f.unproject(verts[1]);
         Vec3 p2 = f.unproject(verts[2]);
         Vec3 p3 = f.unproject(verts[3]);
         scene.addPatch(p0, p1, p2, p3, f.emission, f.reflectance, face_id);
+        // Quad normal: force to face normal for the same reasons as above.
+        scene.patches.back().normal = f.normal;
     } else {
         // Fan-decompose: triangle fan from verts[0]
         Vec3 p0 = f.unproject(verts[0]);
@@ -259,6 +344,7 @@ static void emitPolygon(Scene& scene, const Poly2D& poly, const Face& f, int fac
             Vec3 pi  = f.unproject(verts[i]);
             Vec3 pi1 = f.unproject(verts[i + 1]);
             scene.addPatch(p0, pi, pi1, pi1, f.emission, f.reflectance, face_id);
+            fixTriPatch(scene, f.normal, p0, pi, pi1);
         }
     }
 }
@@ -313,8 +399,10 @@ void apply(Scene& scene)
             Vec3 Lc = (L.verts[0] + L.verts[1] + L.verts[2] + L.verts[3]) * 0.25f;
 
             for (int oi = 0; oi < nf; ++oi) {
-                if (oi == ri || oi == li) continue;
+                if (oi == ri) continue;
                 const Face& O = scene.faces[oi];
+                // Emissive faces (light sources) are sources, not occluders.
+                if (O.emission.x > 0.f || O.emission.y > 0.f || O.emission.z > 0.f) continue;
 
                 // --- Occluder relevance filters ---
                 // 1. O must face toward the light (front-face from light's view)

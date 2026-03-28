@@ -23,11 +23,45 @@ static float tonemap(float x)
 }
 
 // ---------------------------------------------------------------------------
-// Vertex-radiosity averaging
-// The key combines quantised position AND quantised normal so that corner
-// vertices shared between two differently-oriented faces (e.g. wall/ceiling)
-// are treated as independent vertices for each face.  This prevents the dark
-// ceiling corners from bleeding into the top of the walls (Gouraud artefact).
+// Vertex-radiosity interpolation — Shepard's method (1968)
+//
+// Reference: D. Shepard, "A two-dimensional interpolation function for
+//   irregularly spaced data", Proc. 23rd ACM National Conference, 1968,
+//   pp. 517–524.  DOI:10.1145/800186.810616
+//
+// Goal: assign a smooth radiosity colour to every mesh vertex for Gouraud
+// interpolation, using the solved per-patch radiosity values.
+//
+// Why not simple per-patch averaging?
+//   1. Triangle patches (v3 == v2) would double-count vertex 2 if iterated
+//      over all 4 corners, biasing that vertex's colour toward the triangle's
+//      own radiosity and sharpening shadow boundaries.
+//   2. Fan-triangle outer-tip vertices (from disc-mesh polygon decomposition)
+//      may belong to only one patch, so the colour would equal that patch's
+//      radiosity with no blending — causing abrupt jumps across critical lines.
+//
+// Shepard's scattered-data interpolation:
+//   Given a set of sample points {x_j} with values {B_j}, the interpolated
+//   value at query point x is:
+//
+//     B(x) = Σ_j  w_j(x) · B_j  /  Σ_j  w_j(x)
+//
+//   with weights:
+//
+//     w_j(x) = A_j / ( ||x - x_j||²  +  ε² )
+//
+//   where A_j is the area of patch j and ε is a smoothing radius.
+//   Multiplying by area A_j makes larger (better-sampled) patches dominate
+//   and prevents tiny disc-mesh slivers from causing colour spikes.
+//   The ε² term (modified Shepard, Hardy 1971) prevents division-by-zero
+//   when the query vertex coincides with a patch centre, and controls the
+//   spatial extent of each patch's influence.
+//
+// Scope: interpolation is done separately per face (patches grouped by
+// face_id).  The VKey also encodes the surface normal, so corner vertices
+// shared between two differently-oriented faces (e.g. wall/ceiling) are
+// treated as independent vertices for each face — preventing colour bleeding
+// across the dihedral (Cohen & Greenberg 1988 Gouraud artefact).
 // ---------------------------------------------------------------------------
 struct VKey {
     int x, y, z;       // quantised position (1/10000 units)
@@ -47,8 +81,6 @@ struct VKeyHash {
     }
 };
 
-struct RadSum { Vec3 sum{}; int count{}; };
-
 static VKey toKey(const Vec3& v, const Vec3& n)
 {
     return { static_cast<int>(std::round(v.x * 10000)),
@@ -59,28 +91,54 @@ static VKey toKey(const Vec3& v, const Vec3& n)
              static_cast<int>(std::round(n.z * 1000)) };
 }
 
-// Build the vertex→averaged-radiosity table from current patch data.
+// Assign a Shepard-interpolated radiosity colour to every patch vertex.
+// See the block comment above for the full algorithm derivation and references.
 static std::unordered_map<VKey, Vec3, VKeyHash>
 buildVertexColours(const Scene& scene)
 {
-    std::unordered_map<VKey, RadSum, VKeyHash> acc;
-    acc.reserve(scene.patches.size() * 4);
-
-    for (const auto& p : scene.patches) {
-        for (int i = 0; i < 4; ++i) {
-            auto& entry = acc[toKey(p.verts[i], p.normal)];
-            entry.sum.x += p.radiosity.x;
-            entry.sum.y += p.radiosity.y;
-            entry.sum.z += p.radiosity.z;
-            entry.count++;
-        }
-    }
+    // Group patches by face for intra-face interpolation.
+    std::unordered_map<int, std::vector<const Patch*>> by_face;
+    by_face.reserve(32);
+    for (const auto& p : scene.patches)
+        by_face[p.face_id].push_back(&p);
 
     std::unordered_map<VKey, Vec3, VKeyHash> result;
-    result.reserve(acc.size());
-    for (auto& [key, rs] : acc) {
-        float inv = 1.f / rs.count;
-        result[key] = rs.sum * inv;
+    result.reserve(scene.patches.size() * 4);
+
+    // ε² = (0.04)²: smoothing radius ≈ 4 % of a unit-wide face (~22 mm at
+    // real Cornell scale).  Follows Hardy (1971) modified-Shepard convention
+    // to avoid singularities when a vertex coincides with a patch centre.
+    static constexpr float SMOOTH_EPS2 = 0.04f * 0.04f;
+
+    for (const auto& p : scene.patches) {
+        // Avoid double-counting v3==v2 for triangle patches.
+        bool is_tri = (p.verts[2].x == p.verts[3].x &&
+                       p.verts[2].y == p.verts[3].y &&
+                       p.verts[2].z == p.verts[3].z);
+        int nv = is_tri ? 3 : 4;
+
+        const auto& fps = by_face.at(p.face_id);
+
+        for (int i = 0; i < nv; ++i) {
+            VKey key = toKey(p.verts[i], p.normal);
+            if (result.count(key)) continue; // already computed
+
+            // Shepard (1968): B(x) = Σ w_j·B_j / Σ w_j,  w_j = A_j/(dist²+ε²)
+            Vec3  wsum{};
+            float wtotal = 0.f;
+            for (const Patch* q : fps) {
+                float dx = q->center.x - p.verts[i].x;
+                float dy = q->center.y - p.verts[i].y;
+                float dz = q->center.z - p.verts[i].z;
+                float w  = q->area / (dx*dx + dy*dy + dz*dz + SMOOTH_EPS2);
+                wsum.x  += q->radiosity.x * w;
+                wsum.y  += q->radiosity.y * w;
+                wsum.z  += q->radiosity.z * w;
+                wtotal  += w;
+            }
+            if (wtotal > 0.f)
+                result[key] = wsum * (1.f / wtotal);
+        }
     }
     return result;
 }
@@ -120,7 +178,6 @@ void setWireframe(bool enable) { g_wireframe = enable; }
 void draw(const Scene& scene)
 {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glPolygonMode(GL_FRONT_AND_BACK, g_wireframe ? GL_LINE : GL_FILL);
 
     // Build per-vertex averaged radiosity (Gouraud colours) each frame.
     // For a static solved scene this could be cached, but the cost is trivial
@@ -136,8 +193,8 @@ void draw(const Scene& scene)
         }
     };
 
-    // Helper: emit both triangles of a quad patch.
-    auto drawPatch = [&](const Patch& p) {
+    // Fill mode: two triangles per quad patch.
+    auto drawPatchFill = [&](const Patch& p) {
         vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
         vertColour(p.verts[1], p.normal); glVertex3fv(&p.verts[1].x);
         vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
@@ -146,26 +203,62 @@ void draw(const Scene& scene)
         vertColour(p.verts[3], p.normal); glVertex3fv(&p.verts[3].x);
     };
 
+    // Wireframe mode: draw only the true patch boundary as explicit edges
+    // (GL_LINES pairs).  A triangle patch has v3==v2; that gives 3 edges.
+    // A quad patch gives 4 edges.  Using GL_LINES avoids the internal
+    // v0→v2 diagonal that GL_TRIANGLES+GL_LINE mode would otherwise draw
+    // across every patch, including unwanted "spokes" in fan-decomposed polygons.
+    auto drawPatchWire = [&](const Patch& p) {
+        bool is_tri = (p.verts[2].x == p.verts[3].x &&
+                       p.verts[2].y == p.verts[3].y &&
+                       p.verts[2].z == p.verts[3].z);
+        // Edge v0→v1
+        vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
+        vertColour(p.verts[1], p.normal); glVertex3fv(&p.verts[1].x);
+        // Edge v1→v2
+        vertColour(p.verts[1], p.normal); glVertex3fv(&p.verts[1].x);
+        vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
+        if (is_tri) {
+            // Edge v2→v0 (close triangle)
+            vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
+            vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
+        } else {
+            // Edge v2→v3
+            vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
+            vertColour(p.verts[3], p.normal); glVertex3fv(&p.verts[3].x);
+            // Edge v3→v0
+            vertColour(p.verts[3], p.normal); glVertex3fv(&p.verts[3].x);
+            vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
+        }
+    };
+
     const int n  = static_cast<int>(scene.patches.size());
     const int bs = scene.box_start;
 
-    // Pass 1: environment geometry (floor, ceiling, walls, light).
-    glBegin(GL_TRIANGLES);
-    for (int i = 0; i < bs; ++i)
-        drawPatch(scene.patches[i]);
-    glEnd();
+    if (g_wireframe) {
+        // Draw patch outlines only — no polygon-fill, no depth offset.
+        glBegin(GL_LINES);
+        for (int i = 0; i < n; ++i)
+            drawPatchWire(scene.patches[i]);
+        glEnd();
+    } else {
+        // Pass 1: environment geometry (floor, ceiling, walls, light).
+        glBegin(GL_TRIANGLES);
+        for (int i = 0; i < bs; ++i)
+            drawPatchFill(scene.patches[i]);
+        glEnd();
 
-    // Pass 2: box geometry, pulled slightly toward the camera via polygon
-    // offset so box sides win the depth test at the y=0 seam with the floor,
-    // eliminating the z-fighting artefact that makes boxes appear to float.
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(-1.0f, -1.0f);
-    glBegin(GL_TRIANGLES);
-    for (int i = bs; i < n; ++i)
-        drawPatch(scene.patches[i]);
-    glEnd();
-    glDisable(GL_POLYGON_OFFSET_FILL);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL); // restore default
+        // Pass 2: box geometry, pulled slightly toward the camera via polygon
+        // offset so box sides win the depth test at the y=0 seam with the floor,
+        // eliminating the z-fighting artefact that makes boxes appear to float.
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -1.0f);
+        glBegin(GL_TRIANGLES);
+        for (int i = bs; i < n; ++i)
+            drawPatchFill(scene.patches[i]);
+        glEnd();
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    }
 }
 
 // ---------------------------------------------------------------------------

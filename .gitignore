@@ -1,6 +1,7 @@
 # Build output
 radiosity
 obj/
+tests/test_discmesh
 
 # Rendered output
 output.ppm
