@@ -1,6 +1,6 @@
 # Build output
 radiosity
-src/*.o
+obj/
 
 # Rendered output
 output.ppm

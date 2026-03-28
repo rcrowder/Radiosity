@@ -6,9 +6,11 @@ SRC = src/main.cpp \
       src/scene.cpp \
       src/hemicube.cpp \
       src/radiosity.cpp \
-      src/render.cpp
+      src/render.cpp \
+      src/discmesh.cpp
 
-OBJ    = $(SRC:.cpp=.o)
+OBJDIR = obj
+OBJ    = $(patsubst src/%.cpp,$(OBJDIR)/%.o,$(SRC))
 TARGET = radiosity
 
 .PHONY: all clean
@@ -18,8 +20,11 @@ all: $(TARGET)
 $(TARGET): $(OBJ)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-%.o: %.cpp
+$(OBJDIR)/%.o: src/%.cpp | $(OBJDIR)
 	$(CXX) $(CXXFLAGS) -c -o $@ $<
 
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
 clean:
-	rm -f $(OBJ) $(TARGET)
+	rm -rf $(OBJDIR) $(TARGET)

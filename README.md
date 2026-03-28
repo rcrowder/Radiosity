@@ -10,11 +10,14 @@ Radiosity is a physically based rendering technique that models diffuse inter-re
 
 This implementation covers the full pipeline:
 
-1. **Scene construction** – the Cornell Box is built from subdivided quads (walls, floor, ceiling, light, two boxes).
-2. **Form-factor computation** – using the **hemicube method** (Cohen & Greenberg 1985): a virtual hemicube is placed at each patch centre; five faces are ray-cast to determine what fraction of emitted energy reaches every other patch.
-3. **Radiosity solve** – **progressive refinement** (Cohen et al. 1988): each iteration selects the patch with the greatest unshot energy and distributes it to all visible patches, converging when remaining unshot energy falls below a threshold.
-4. **Rendering** – OpenGL/GLUT with **Gouraud shading**: per-vertex colours are computed by averaging the radiosity of surrounding patches, then tone-mapped with Reinhard tonemapping and gamma-corrected (γ = 2.2).
-5. **Image output** – the rendered frame is saved as `output.ppm` (binary NetPBM) automatically on the first frame, and again on demand with the `s` key.
+1. **Scene construction** – the Cornell Box is built as a set of logical *faces* (walls, floor, ceiling, light, two boxes) with exact Cornell University coordinates and measured reflectances.
+2. **Meshing** – two modes are supported:
+   - *Uniform grid* (default): each face is subdivided into W×W (walls/ceiling/floor) or B×B (box) equal patches.
+   - *Discontinuity meshing* (`--disc-mesh`): D0 critical lines (Lischinski, Tampieri & Greenberg 1992) are analytically computed per receiver face, then used to BSP-split each face into convex sub-polygons aligned with penumbra boundaries.
+3. **Form-factor computation** – using the **hemicube method** (Cohen & Greenberg 1985): a virtual hemicube is placed at each patch centre; five faces are ray-cast to determine what fraction of emitted energy reaches every other patch.
+4. **Radiosity solve** – **progressive refinement** (Cohen et al. 1988): each iteration selects the patch with the greatest unshot energy and distributes it to all visible patches, converging when remaining unshot energy falls below a threshold.
+5. **Rendering** – OpenGL/GLUT with **Gouraud shading**: per-vertex colours are computed by averaging the radiosity of surrounding patches, then tone-mapped with Reinhard tonemapping and gamma-corrected (γ = 2.2).
+6. **Image output** – the rendered frame is saved as `output.ppm` (binary NetPBM) automatically on the first frame, and again on demand with the `s` key.
 
 ## Building
 
@@ -30,12 +33,15 @@ make
 ## Running
 
 ```bash
-./radiosity
+./radiosity              # uniform grid (default)
+./radiosity --disc-mesh  # D0 discontinuity meshing (Lischinski 1992)
+./radiosity -d           # shorthand for --disc-mesh
 ```
 
 | Key | Action |
 |-----|--------|
 | `s` | Save current frame to `output.ppm` |
+| `w` | Toggle wireframe overlay (shows patch edges) |
 | `q` / `Esc` | Quit |
 
 `output.ppm` is also written automatically when the first frame is rendered. Most image viewers (eog, feh, GIMP) open PPM files directly. To convert to PNG:
@@ -48,11 +54,15 @@ convert output.ppm output.png
 
 ```
 src/
-  scene.h / scene.cpp       – Vec3, Patch, Scene; Cornell Box geometry
-  hemicube.h / hemicube.cpp – form-factor computation via hemicube ray-casting
+  scene.h / scene.cpp         – Vec3, Vec2, Face, Patch, Scene;
+                                Cornell Box geometry; uniform-grid meshing
+  discmesh.h / discmesh.cpp   – D0 discontinuity meshing (Lischinski 1992);
+                                Sutherland-Hodgman polygon splitter;
+                                Cyrus-Beck segment clipping
+  hemicube.h / hemicube.cpp   – form-factor computation via hemicube ray-casting
   radiosity.h / radiosity.cpp – progressive refinement solver
-  render.h / render.cpp     – OpenGL renderer + PPM screenshot export
-  main.cpp                  – entry point: build scene, solve, open window
+  render.h / render.cpp       – OpenGL renderer + PPM screenshot export
+  main.cpp                    – entry point: build scene, mesh, solve, open window
 Makefile
 Cornell_box_1991_measured.jpg  – reference photograph (Cornell University, 1991)
 ```
@@ -83,3 +93,4 @@ A quantitative region-by-region analysis comparing `output.ppm` against `Cornell
 - Goral, C. M., Torrance, K. E., Greenberg, D. P., & Battaile, B. (1984). *Modeling the interaction of light between diffuse surfaces.* SIGGRAPH '84.
 - Cohen, M. F., & Greenberg, D. P. (1985). *The hemi-cube: A radiosity solution for complex environments.* SIGGRAPH '85.
 - Cohen, M. F., Chen, S. E., Wallace, J. R., & Greenberg, D. P. (1988). *A progressive refinement approach to fast radiosity image generation.* SIGGRAPH '88.
+- Lischinski, D., Tampieri, F., & Greenberg, D. P. (1992). *Discontinuity meshing for accurate radiosity.* IEEE Computer Graphics and Applications, 12(6), 25–39.

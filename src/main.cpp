@@ -1,10 +1,12 @@
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <GL/glut.h>
 #include "scene.h"
 #include "hemicube.h"
 #include "radiosity.h"
 #include "render.h"
+#include "discmesh.h"
 
 static Scene g_scene;
 static bool  g_save_next_frame = true;   // auto-save on the first rendered frame
@@ -44,9 +46,26 @@ static void keyboard(unsigned char key, int /*x*/, int /*y*/)
 
 int main(int argc, char** argv)
 {
+    // Parse flags before passing argc/argv to GLUT
+    bool use_disc_mesh = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--disc-mesh") == 0 ||
+            std::strcmp(argv[i], "-d") == 0)
+            use_disc_mesh = true;
+    }
+
     // Build scene
     std::printf("Building Cornell Box scene...\n");
     g_scene.buildCornellBox();
+    std::printf("  %zu logical faces\n", g_scene.faces.size());
+
+    if (use_disc_mesh) {
+        std::printf("Meshing: discontinuity meshing (D0 critical lines, Lischinski 1992)\n");
+        DiscMesh::apply(g_scene);
+    } else {
+        std::printf("Meshing: uniform grid (W=10, B=4)\n");
+        g_scene.meshUniform(10, 4);
+    }
     std::printf("  %zu patches\n", g_scene.patches.size());
 
     // Compute form factors via hemicube
@@ -54,54 +73,35 @@ int main(int argc, char** argv)
     std::printf("Computing form factors (hemicube res=%d)...\n", hemi_res);
     auto F = Hemicube::computeFormFactors(g_scene, hemi_res);
 
-    // Print form-factor matrix (useful for verification)
-    const int n = static_cast<int>(g_scene.patches.size());
-    /*
-    std::printf("Form factor matrix F[i][j]:\n");
-    for (int i = 0; i < n; ++i) {
-        std::printf("  patch %d: ", i);
-        float row_sum = 0.f;
-        for (int j = 0; j < n; ++j) {
-            std::printf("%.3f ", F[i*n+j]);
-            row_sum += F[i*n+j];
-        }
-        std::printf(" (sum=%.3f)\n", row_sum);
-    }
-    */
-
     // Solve radiosity with progressive refinement
     std::printf("Solving radiosity (progressive refinement)...\n");
     Radiosity::solve(g_scene, F);
 
-    // Print per-face averaged radiosity.
-    // Each logical face maps to a contiguous run of sub-patches produced by
-    // addSubdividedQuad (W×W for walls, B×B for box faces, 1 for the light).
-    constexpr int W = 10, B = 4;
-    struct FaceDesc { const char* name; int count; };
-    const FaceDesc faces[] = {
-        {"Floor",        W*W}, {"Ceiling",      W*W}, {"Back wall",    W*W},
-        {"Right(green)", W*W}, {"Left(red)",    W*W}, {"Light",          1},
-        {"Short top",    B*B}, {"Short front",  B*B}, {"Short right",  B*B},
-        {"Short back",   B*B}, {"Short left",   B*B},
-        {"Tall top",     B*B}, {"Tall front",   B*B}, {"Tall right",   B*B},
-        {"Tall back",    B*B}, {"Tall left",    B*B},
-    };
+    // Print per-face averaged radiosity, grouped by face_id.
     std::printf("Per-face average radiosity:\n");
-    int idx = 0;
-    for (const auto& f : faces) {
-        Vec3 avg{};
-        for (int k = 0; k < f.count && idx + k < n; ++k)
-            avg = avg + g_scene.patches[idx + k].radiosity;
-        avg = avg * (1.f / f.count);
-        std::printf("  %-14s  B=(%.3f, %.3f, %.3f)\n", f.name, avg.x, avg.y, avg.z);
-        idx += f.count;
+    const int nf = static_cast<int>(g_scene.faces.size());
+    std::vector<Vec3> face_sum(nf, Vec3{});
+    std::vector<int>  face_cnt(nf, 0);
+    for (const auto& p : g_scene.patches) {
+        if (p.face_id >= 0 && p.face_id < nf) {
+            face_sum[p.face_id] = face_sum[p.face_id] + p.radiosity;
+            face_cnt[p.face_id]++;
+        }
+    }
+    for (int fi = 0; fi < nf; ++fi) {
+        if (face_cnt[fi] == 0) continue;
+        Vec3 avg = face_sum[fi] * (1.f / face_cnt[fi]);
+        std::printf("  %-14s  B=(%.3f, %.3f, %.3f)  (%d patches)\n",
+                    g_scene.faces[fi].name.c_str(), avg.x, avg.y, avg.z, face_cnt[fi]);
     }
 
     // Open GL window
     glutInit(&argc, argv);
     glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_DEPTH);
     glutInitWindowSize(640, 480);
-    glutCreateWindow("Radiosity — Cohen et al. 1985/1988");
+    glutCreateWindow(use_disc_mesh
+        ? "Radiosity — disc-mesh (Lischinski 1992)"
+        : "Radiosity — uniform mesh (Cohen 1988)");
 
     Render::init();
     Render::reshape(640, 480);
@@ -110,8 +110,9 @@ int main(int argc, char** argv)
     glutReshapeFunc(reshape);
     glutKeyboardFunc(keyboard);
 
-    std::printf("\nPress ESC or 'q' to quit.  Press 's' to save a screenshot (output.ppm).\n");
-    std::printf("A screenshot will also be saved automatically on the first frame.\n");
+    std::printf("\nPress ESC or 'q' to quit.  's' = screenshot  'w' = wireframe\n");
+    std::printf("Meshing mode: %s\n",
+                use_disc_mesh ? "discontinuity (--disc-mesh / -d)" : "uniform (default)");
     glutMainLoop();
     return 0;
 }
