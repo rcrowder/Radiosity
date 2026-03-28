@@ -58,17 +58,22 @@ static float tonemap(float x)
 //   spatial extent of each patch's influence.
 //
 // Scope: interpolation is done separately per face (patches grouped by
-// face_id).  The VKey also encodes the surface normal, so corner vertices
-// shared between two differently-oriented faces (e.g. wall/ceiling) are
-// treated as independent vertices for each face — preventing colour bleeding
-// across the dihedral (Cohen & Greenberg 1988 Gouraud artefact).
+// face_id).  The VKey encodes position, surface normal, AND face_id, so
+// corner vertices shared between two different faces are always treated as
+// independent — even when the faces are co-planar and co-normal (e.g. the
+// flush area light and its surrounding ceiling strips both have normal -Y
+// and share 4 corner positions; without face_id in the key, whichever face
+// is iterated first would claim those VKeys, and the light would render with
+// ceiling radiosities instead of its own emission).
 // ---------------------------------------------------------------------------
 struct VKey {
     int x, y, z;       // quantised position (1/10000 units)
     int nx, ny, nz;    // quantised normal   (1/1000 — normals are unit length)
+    int face_id;       // logical face index — disambiguates co-planar co-normal faces
     bool operator==(const VKey& o) const {
         return x==o.x && y==o.y && z==o.z
-            && nx==o.nx && ny==o.ny && nz==o.nz;
+            && nx==o.nx && ny==o.ny && nz==o.nz
+            && face_id==o.face_id;
     }
 };
 struct VKeyHash {
@@ -77,18 +82,20 @@ struct VKeyHash {
         auto mix = [&](int v){ h ^= static_cast<std::size_t>(v); h *= 16777619u; };
         mix(k.x); mix(k.y); mix(k.z);
         mix(k.nx); mix(k.ny); mix(k.nz);
+        mix(k.face_id);
         return h;
     }
 };
 
-static VKey toKey(const Vec3& v, const Vec3& n)
+static VKey toKey(const Vec3& v, const Vec3& n, int face_id)
 {
     return { static_cast<int>(std::round(v.x * 10000)),
              static_cast<int>(std::round(v.y * 10000)),
              static_cast<int>(std::round(v.z * 10000)),
              static_cast<int>(std::round(n.x * 1000)),
              static_cast<int>(std::round(n.y * 1000)),
-             static_cast<int>(std::round(n.z * 1000)) };
+             static_cast<int>(std::round(n.z * 1000)),
+             face_id };
 }
 
 // Assign a Shepard-interpolated radiosity colour to every patch vertex.
@@ -120,7 +127,7 @@ buildVertexColours(const Scene& scene)
         const auto& fps = by_face.at(p.face_id);
 
         for (int i = 0; i < nv; ++i) {
-            VKey key = toKey(p.verts[i], p.normal);
+            VKey key = toKey(p.verts[i], p.normal, p.face_id);
             if (result.count(key)) continue; // already computed
 
             // Shepard (1968): B(x) = Σ w_j·B_j / Σ w_j,  w_j = A_j/(dist²+ε²)
@@ -184,8 +191,8 @@ void draw(const Scene& scene)
     // compared to the solve itself.
     auto vc = buildVertexColours(scene);
 
-    auto vertColour = [&](const Vec3& v, const Vec3& n) {
-        auto it = vc.find(toKey(v, n));
+    auto vertColour = [&](const Vec3& v, const Vec3& n, int fid) {
+        auto it = vc.find(toKey(v, n, fid));
         if (it != vc.end()) {
             glColor3f(tonemap(it->second.x),
                       tonemap(it->second.y),
@@ -195,12 +202,12 @@ void draw(const Scene& scene)
 
     // Fill mode: two triangles per quad patch.
     auto drawPatchFill = [&](const Patch& p) {
-        vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
-        vertColour(p.verts[1], p.normal); glVertex3fv(&p.verts[1].x);
-        vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
-        vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
-        vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
-        vertColour(p.verts[3], p.normal); glVertex3fv(&p.verts[3].x);
+        vertColour(p.verts[0], p.normal, p.face_id); glVertex3fv(&p.verts[0].x);
+        vertColour(p.verts[1], p.normal, p.face_id); glVertex3fv(&p.verts[1].x);
+        vertColour(p.verts[2], p.normal, p.face_id); glVertex3fv(&p.verts[2].x);
+        vertColour(p.verts[0], p.normal, p.face_id); glVertex3fv(&p.verts[0].x);
+        vertColour(p.verts[2], p.normal, p.face_id); glVertex3fv(&p.verts[2].x);
+        vertColour(p.verts[3], p.normal, p.face_id); glVertex3fv(&p.verts[3].x);
     };
 
     // Wireframe mode: draw only the true patch boundary as explicit edges
@@ -213,22 +220,22 @@ void draw(const Scene& scene)
                        p.verts[2].y == p.verts[3].y &&
                        p.verts[2].z == p.verts[3].z);
         // Edge v0→v1
-        vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
-        vertColour(p.verts[1], p.normal); glVertex3fv(&p.verts[1].x);
+        vertColour(p.verts[0], p.normal, p.face_id); glVertex3fv(&p.verts[0].x);
+        vertColour(p.verts[1], p.normal, p.face_id); glVertex3fv(&p.verts[1].x);
         // Edge v1→v2
-        vertColour(p.verts[1], p.normal); glVertex3fv(&p.verts[1].x);
-        vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
+        vertColour(p.verts[1], p.normal, p.face_id); glVertex3fv(&p.verts[1].x);
+        vertColour(p.verts[2], p.normal, p.face_id); glVertex3fv(&p.verts[2].x);
         if (is_tri) {
             // Edge v2→v0 (close triangle)
-            vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
-            vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
+            vertColour(p.verts[2], p.normal, p.face_id); glVertex3fv(&p.verts[2].x);
+            vertColour(p.verts[0], p.normal, p.face_id); glVertex3fv(&p.verts[0].x);
         } else {
             // Edge v2→v3
-            vertColour(p.verts[2], p.normal); glVertex3fv(&p.verts[2].x);
-            vertColour(p.verts[3], p.normal); glVertex3fv(&p.verts[3].x);
+            vertColour(p.verts[2], p.normal, p.face_id); glVertex3fv(&p.verts[2].x);
+            vertColour(p.verts[3], p.normal, p.face_id); glVertex3fv(&p.verts[3].x);
             // Edge v3→v0
-            vertColour(p.verts[3], p.normal); glVertex3fv(&p.verts[3].x);
-            vertColour(p.verts[0], p.normal); glVertex3fv(&p.verts[0].x);
+            vertColour(p.verts[3], p.normal, p.face_id); glVertex3fv(&p.verts[3].x);
+            vertColour(p.verts[0], p.normal, p.face_id); glVertex3fv(&p.verts[0].x);
         }
     };
 
